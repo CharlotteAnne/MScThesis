@@ -1,0 +1,710 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+library(purrr)
+library(dplyr)
+library(ggplot2)
+library(data.table)
+library(stringr)
+library(ggthemes)
+library(rowr)
+`%not in%` <- function (x, table) is.na(match(x, table, nomatch=NA_integer_))
+```
+
+Question:
+
+At a given deltapsi threshold (0.2,0.4,0.6), what percentage of LSVs are unique to one tissue, two tissues, three tissues or four tissues?
+
+```{r}
+# load up the data, check that the unannotated column makes sense
+
+rat_merge_data <- fread("/homes/s1207699/data/rna/MAJIQ_analysis/rat/final_lsvs_4.tsv")
+rat_ne_net <- fread('/homes/s1207699/stuff_fromeric/RAT_NEMMnetlist_nets_3.bed')
+rat_ne_net_names <- rat_ne_net$V4
+```
+
+For junctions instead of LSVs, makes more sense 
+Need to reformat the LSV results from MAJIQ to be junction-centric.
+
+```{r}
+rat_merge_data
+a <- str_split_fixed(rat_merge_data[[7]],";", Inf) # Taking just the junction column
+n_juncs <- ncol(data.frame(a)) # This is the maximum number of junctions in an LSV
+
+n_tissue_comp <- 10 # Number of pairwise comparisons
+
+y <- list()
+for (o in 1:n_juncs){
+  z <- list()
+  for (i in 1:10){
+    b = data.frame(str_split_fixed(rat_merge_data[[i+n_tissue_comp ]],";", Inf)) # This is taking each of the tissue comparison columns in turn
+    if (ncol(b)<n_juncs){
+      difference = n_juncs-ncol(b) # This is how many empty columns need to be added to the df, because not all comparisons will involve
+                                   # the same maximum number of junctions
+      b = data.frame(b, matrix(, nrow = nrow(b), ncol = difference)) 
+    }
+    z[[i]] = b[,o] # Each df(matrix) contains the deltapsi values for one tissue comp, associated with one junction
+  }
+  p = do.call(paste,c(z,sep=",")) # Paste the matrices together
+  y[[o]] = paste(rat_merge_data$`Gene Name`,rat_merge_data$`Gene ID`,rat_merge_data$`LSV ID`, rat_merge_data$chr, a[,o],rat_merge_data$strand,p,sep=",") # Add the junction coordinates
+}
+
+# Make the matrixes dataframes and make the colnames uniform so I can use rbind
+for (i in seq_along(y)){
+  y[[i]] <- data.frame(y[[i]])
+  colnames(y[[i]]) <- c("juncs")
+}
+
+final <- do.call(rbind,y)
+
+# Final formatting 
+
+final <- data.frame(str_split_fixed(final$juncs,",",Inf))
+
+
+final <- data.frame(final[,1:2],final[,4],str_split_fixed(final[[5]],"-",2),final[,6:ncol(final)])
+colnames(final) <- c("Gene.name","Gene.id","chr","junction.start","junction.stop","strand","muscle_liver","muscle_brain","muscle_heart","muscle_testes","heart_liver","heart_brain","heart_testes","testes_brain","testes_liver","brain_liver")
+final
+
+# Get rid of rows that are empty for junction.start (and therefore empty for junction.stop too)
+final <- final[final$junction.start != "",]
+
+#Get rid of duplicate rows (junctions that were described by multiple LSVs)
+
+final$check_id <- paste0(final$chr,':',final$junction.start,'-',final$junction.stop,';',final$strand)
+final <- unique(final)
+
+# Need to make all the pairwise comparison columns numeric and round them
+for (i in 8:ncol(final)-1){
+  final[[i]] = round(as.numeric(as.character(final[[i]])),2)
+}
+
+final[is.na(final)] <- 0
+final <- unique(final)
+t <- final[duplicated(final$check_id),]
+t
+
+# Need to get the ranges
+# keys are all the variables that should stay the same
+keys <- c("chr","junction.start","junction.stop","strand","check_id")
+
+X <- as.data.table(final[,3:ncol(final)])
+X <- X[,lapply(.SD,sd),keys]
+X
+X <- unique(X)
+t <- X[duplicated(X$check_id),]
+
+standev <- X %>% select(-chr,-junction.start,-junction.stop,-strand,-check_id) %>% unlist(., use.names=FALSE)
+standev <- standev[!is.na(standev)]
+standev <- data.frame(standev)
+
+ggplot(standev,aes(x=standev)) + geom_histogram(binwidth = 0.05) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black"))
+```
+
+```{r}
+
+# Take the means 
+
+keys <- c("Gene.name","Gene.id","chr","junction.start","junction.stop","strand","check_id")
+mean_final <- as.data.table(final)
+mean_final <- mean_final[,lapply(.SD,mean),keys]
+mean_final <- unique(mean_final)
+
+# Some junctions will still be present twice if they are annotated to more than one 
+# gene. These are genuine, have checked genome browser.
+t <- mean_final[duplicated(mean_final$check_id),]
+mean_final$check_id[duplicated(mean_final$check_id)]
+
+# Some examples
+mean_final[mean_final$check_id=="12:44254657-44259573;-",]
+mean_final[mean_final$check_id=="20:4789220-4892951;-",]
+mean_final[mean_final$check_id=="15:36887331-36897378;+",]
+
+
+
+mean_final[mean_final$check_id=="3:8655871-8655979;+",]
+
+```
+
+
+
+Now, make tissue-specific tables and score them
+
+```{r}
+
+tissues <- c("muscle","brain","liver","heart","testes")
+
+# Make tissue-specific dataframes
+
+summariseSplicing <- function(x,thresh,tish){ # x is df, y is threshold, z is tissue list
+  tissue_dfs <- list()
+  for (i in 1:length(tish)){
+    tissue_dfs[[i]] = x %>% select(Gene.name,Gene.id,check_id,chr,junction.start,junction.stop,strand,    matches(tish[i]))
+  }
+
+# For comparisons that are the 'wrong way' round, multiply deltapsi score by -1
+  for (i in 1:length(tish)){
+    x = tissue_dfs[[i]] %>% select(ends_with(tish[i]))
+    x = x*-1
+    y = tissue_dfs[[i]] %>% select(- ends_with(tish[i]))
+    if (nrow(x)>0){
+      tissue_dfs[[i]] = data.frame(y,x)
+    }
+  }
+
+# Multiply everything by -1 to get 1 to mean a junction that is included in the first tissue
+# in the comparison
+
+  for (i in 1:length(tish)){
+    x = tissue_dfs[[i]][,8:ncol(tissue_dfs[[i]])]
+    x = x*-1
+    y = tissue_dfs[[i]][,1:7]
+    tissue_dfs[[i]] = data.frame(y,x)
+  }
+
+
+# For each dataframe convert values above threshold to 1, below threshold to 0, then add a column of totals for each LSV
+  for (i in 1:length(tissue_dfs)){
+    y = tissue_dfs[[i]] %>% select(matches(tish[i])) 
+    y[y > thresh] = 1
+    y[y <= thresh] = 0
+    tissue_dfs[[i]] = data.frame(tissue_dfs[[i]]$Gene.name,tissue_dfs[[i]]$Gene.id,tissue_dfs[[i]]$check_id, y)
+    tissue_dfs[[i]]$total = as.numeric(tissue_dfs[[i]][[4]]) + as.numeric(tissue_dfs[[i]][[5]]) +    as.numeric(tissue_dfs[[i]][[6]]) + as.numeric(tissue_dfs[[i]][[7]])
+  }
+
+# Make a summary dataframe with the junctions and their score for each tissue table
+
+  summary_df <- data.frame(tissue_dfs[[1]][[1]], tissue_dfs[[2]][[2]], tissue_dfs[[3]][[3]])
+  for (i in 1:length(tissue_dfs)){
+    summary_df <- data.frame(summary_df,tissue_dfs[[i]]$total)
+  }
+
+  colnames(summary_df) <- c("Gene.name","Gene.id","check_id", tish)
+
+  summary_df$total <- summary_df[[4]] + summary_df[[5]] + summary_df[[6]] + summary_df[[7]] + summary_df[[8]]
+
+# Get rid of junctions that have a total of 0 at this threshold
+  summary_df <- summary_df[summary_df$total>0,]
+  return(summary_df)
+}
+
+
+# Can group junctions in the same gene that are behaving in the same way
+# These are likely involved in the same isoform, found that this doesn't catch 
+# any junctions
+
+#summary_df
+#summary_df %>% group_by(Gene.id,muscle,brain,liver,heart,testes,total) %>% unique()
+
+# Cut offs
+cutoffs <-list()
+threshold_0.2 <- summariseSplicing(mean_final,0.2,tissues)
+threshold_0.2$threshold <- rep("threshold 0.2",nrow(threshold_0.2))
+cutoffs[[1]] <- threshold_0.2
+threshold_0.3 <- summariseSplicing(mean_final,0.3,tissues)
+threshold_0.3$threshold <- rep("threshold 0.3",nrow(threshold_0.3))
+cutoffs[[2]] <- threshold_0.3
+threshold_0.4 <- summariseSplicing(mean_final,0.4,tissues)
+threshold_0.4$threshold <- rep("threshold 0.4",nrow(threshold_0.4))
+cutoffs[[3]] <- threshold_0.4
+threshold_0.5 <- summariseSplicing(mean_final,0.5,tissues)
+threshold_0.5$threshold <- rep("threshold 0.5",nrow(threshold_0.5))
+cutoffs[[4]] <- threshold_0.5
+threshold_0.6 <- summariseSplicing(mean_final,0.6,tissues)
+threshold_0.6$threshold <- rep("threshold 0.6",nrow(threshold_0.6))
+cutoffs[[5]] <- threshold_0.6
+threshold_0.7 <- summariseSplicing(mean_final,0.7,tissues)
+threshold_0.7$threshold <- rep("threshold 0.7",nrow(threshold_0.7))
+cutoffs[[6]] <- threshold_0.7
+threshold_0.8 <- summariseSplicing(mean_final,0.8,tissues)
+threshold_0.8$threshold <- rep("threshold 0.8",nrow(threshold_0.8))
+cutoffs[[7]] <- threshold_0.8
+threshold_0.9 <- summariseSplicing(mean_final,0.9,tissues)
+threshold_0.9$threshold <- rep("threshold 0.9",nrow(threshold_0.9))
+cutoffs[[8]] <- threshold_0.9
+
+graphing <- do.call(rbind,cutoffs)
+graphing <- data.frame(graphing)
+graphing <- graphing %>% dplyr::count(threshold,total) 
+ggplot(graphing,aes(x=total,y=n,group=threshold,colour=threshold)) + geom_line(aes(fill=threshold)) +
+  ylab("number of junctions") + xlab("total score") + scale_x_continuous(breaks=seq(1,10,1)) + scale_y_log10()
+
+```
+There seems to be a peak at 1,4 and 6
+1 describes where the gene is only expressed in two tissues, but has a splicing change between them.
+
+Let's make the same graph but for each tissue seperately:
+
+```{r}
+# Make seperate graphs 
+
+tissues <- c("muscle","brain","liver","heart","testes")
+
+# Make tissue-specific dataframes
+
+getTissueDataframes <- function(x,thresh,tish){ # x is df, thresh is threshold, tish is tissue list
+  tissue_dfs <- list()
+  for (i in 1:length(tish)){
+    tissue_dfs[[i]] = x %>% select(Gene.id,check_id,chr,junction.start,junction.stop,strand,    matches(tish[i]))
+  }
+
+# For comparisons that are the 'wrong way' round, multiply deltapsi score by -1
+  for (i in 1:length(tish)){
+    x = tissue_dfs[[i]] %>% select(ends_with(tish[i]))
+    x = x*-1
+    y = tissue_dfs[[i]] %>% select(- ends_with(tish[i]))
+    if (nrow(x)>0){
+      tissue_dfs[[i]] = data.frame(y,x)
+    }
+  }
+
+# Multiply everything by -1 to get 1 to mean a junction that is included in the first tissue
+# in the comparison
+
+  for (i in 1:length(tish)){
+    x = tissue_dfs[[i]][,7:ncol(tissue_dfs[[i]])]
+    x = x*-1
+    y = tissue_dfs[[i]][,1:6]
+    tissue_dfs[[i]] = data.frame(y,x)
+  }
+
+
+# For each dataframe convert values above threshold to 1, below threshold to 0, then add a column of totals for each LSV
+  for (i in 1:length(tissue_dfs)){
+    y = tissue_dfs[[i]] %>% select(matches(tish[i])) 
+    y[y > thresh] = 1
+    y[y <= thresh] = 0
+    tissue_dfs[[i]] = data.frame(tissue_dfs[[i]]$Gene.id,tissue_dfs[[i]]$check_id, y)
+    tissue_dfs[[i]]$total = as.numeric(tissue_dfs[[i]][[3]]) + as.numeric(tissue_dfs[[i]][[4]]) +    as.numeric(tissue_dfs[[i]][[5]]) + as.numeric(tissue_dfs[[i]][[6]])
+    tissue_dfs[[i]] <- tissue_dfs[[i]][tissue_dfs[[i]]$total>0,] # get rid of junctions that are all 0
+  }
+  return(tissue_dfs)
+}
+
+MUSCLE_LIST <- NULL
+for (i in seq(0.2,0.9,0.1)){
+  y = getTissueDataframes(mean_final,i,tissues)
+  x = data.frame(y[[1]]$total)
+  x$threshold = as.factor(rep(i,nrow(x)))
+  MUSCLE_LIST <- c(MUSCLE_LIST,list(x))
+}
+
+muscle_graph <- do.call(rbind,MUSCLE_LIST)
+muscle_graph <- muscle_graph %>% dplyr::count(threshold,y..1...total)
+muscle_graph
+ggplot(muscle_graph,aes(x=y..1...total,y=n,group=threshold,colour=threshold)) + geom_line(aes(fill=threshold)) +
+  ylab("number of junctions") + xlab("total score") + scale_x_continuous(breaks=seq(1,10,1)) + scale_y_log10()
+
+```
+
+```{r}
+BRAIN_LIST <- NULL
+for (i in seq(0.2,0.9,0.1)){
+  y = getTissueDataframes(mean_final,i,tissues)
+  x = data.frame(y[[2]]$total)
+  x$threshold = as.factor(rep(i,nrow(x)))
+  BRAIN_LIST <- c(BRAIN_LIST,list(x))
+}
+
+BRAIN_graph <- do.call(rbind,BRAIN_LIST)
+BRAIN_graph <- BRAIN_graph %>% dplyr::count(threshold,y..2...total)
+BRAIN_graph
+ggplot(BRAIN_graph,aes(x=y..2...total,y=n,group=threshold,colour=threshold)) + geom_line(aes(fill=threshold)) +
+  ylab("number of junctions") + xlab("total score") + scale_x_continuous(breaks=seq(1,10,1)) + scale_y_log10()
+
+```
+```{r}
+
+LIVER_LIST <- NULL
+for (i in seq(0.2,0.9,0.1)){
+  y = getTissueDataframes(mean_final,i,tissues)
+  x = data.frame(y[[3]]$total)
+  x$threshold = as.factor(rep(i,nrow(x)))
+  LIVER_LIST <- c(LIVER_LIST,list(x))
+}
+
+LIVER_graph <- do.call(rbind,LIVER_LIST)
+LIVER_graph <- LIVER_graph %>% dplyr::count(threshold,y..3...total)
+LIVER_graph
+ggplot(LIVER_graph,aes(x=y..3...total,y=n,group=threshold,colour=threshold)) + geom_line(aes(fill=threshold)) +
+  ylab("number of junctions") + xlab("total score") + scale_x_continuous(breaks=seq(1,10,1)) + scale_y_log10()
+
+```
+
+```{r}
+HEART_LIST <- NULL
+for (i in seq(0.2,0.9,0.1)){
+  y = getTissueDataframes(mean_final,i,tissues)
+  x = data.frame(y[[4]]$total)
+  x$threshold = as.factor(rep(i,nrow(x)))
+  HEART_LIST <- c(HEART_LIST,list(x))
+}
+
+HEART_graph <- do.call(rbind,HEART_LIST)
+HEART_graph <- HEART_graph %>% dplyr::count(threshold,y..4...total)
+HEART_graph
+ggplot(HEART_graph,aes(x=y..4...total,y=n,group=threshold,colour=threshold)) + geom_line(aes(fill=threshold)) +
+  ylab("number of junctions") + xlab("total score") + scale_x_continuous(breaks=seq(1,10,1)) + scale_y_log10()
+```
+
+```{r}
+TESTES_LIST <- NULL
+for (i in seq(0.2,0.9,0.1)){
+  y = getTissueDataframes(mean_final,i,tissues)
+  x = data.frame(y[[5]]$total)
+  x$threshold = as.factor(rep(i,nrow(x)))
+  TESTES_LIST <- c(TESTES_LIST,list(x))
+}
+
+TESTES_graph <- do.call(rbind,TESTES_LIST)
+TESTES_graph <- TESTES_graph %>% dplyr::count(threshold,y..5...total)
+TESTES_graph
+ggplot(TESTES_graph,aes(x=y..5...total,y=n,group=threshold,colour=threshold)) + geom_line(aes(fill=threshold)) +
+  ylab("number of junctions") + xlab("total score") + scale_x_continuous(breaks=seq(1,10,1)) + scale_y_log10()
+```
+
+
+```{r}
+
+# Junctions expressed in...
+
+# all tissues & specific splicing in one
+one_spec <- vector()
+for (i in 1:length(cutoffs)){
+one_spec[[i]] <- cutoffs[[i]] %>% filter(total == 4) %>% filter_at(vars(-check_id, -Gene.id, -total), any_vars(. == 4)) %>% nrow()
+}
+one_spec <- data.frame(one_spec)
+one_spec$tissues_expressed <- rep(5,nrow(one_spec))
+one_spec$threshold <- seq(0.2,0.9,0.1)
+colnames(one_spec) <- c("n_junctions","tissues_expressed","threshold")
+
+# four tissues & specific splicing in one
+two_spec <- vector()
+for (i in 1:length(cutoffs)){
+two_spec[[i]] <- cutoffs[[i]] %>% filter(total == 3) %>% filter_at(vars(-check_id, -Gene.id, -total), any_vars(. == 3)) %>% nrow()
+}
+two_spec <- data.frame(two_spec)
+two_spec$tissues_expressed <- rep(4,nrow(two_spec))
+two_spec$threshold <- seq(0.2,0.9,0.1)
+colnames(two_spec) <- c("n_junctions","tissues_expressed","threshold")
+
+# three tissues & specific splicing in one
+three_spec <- vector()
+for (i in 1:length(cutoffs)){
+three_spec[[i]] <- cutoffs[[i]] %>% filter(total == 2) %>% filter_at(vars(-check_id, -Gene.id, -total), any_vars(. == 2)) %>% nrow()
+}
+three_spec <- data.frame(three_spec)
+three_spec$tissues_expressed <- rep(3,nrow(three_spec))
+three_spec$threshold <- seq(0.2,0.9,0.1)
+colnames(three_spec) <- c("n_junctions","tissues_expressed","threshold")
+
+# two tissues & specific splicing in one
+four_spec <- vector()
+for (i in 1:length(cutoffs)){
+four_spec[[i]] <- cutoffs[[i]] %>% filter(total == 1) %>% filter_at(vars(-check_id, -Gene.id, -total), any_vars(. == 1)) %>% nrow()
+}
+four_spec <- data.frame(four_spec)
+four_spec$tissues_expressed <- rep(2,nrow(four_spec))
+four_spec$threshold <- seq(0.2,0.9,0.1)
+colnames(four_spec) <- c("n_junctions","tissues_expressed","threshold")
+
+one_spec
+graphing2 <- rbind(one_spec,two_spec,three_spec,four_spec)
+graphing2 
+graphing2$threshold <- as.factor(graphing2$threshold)
+ggplot(graphing2,aes(x=tissues_expressed, y=n_junctions,group=threshold,colour=threshold)) + geom_line(aes(fill=threshold)) +
+  ylab("number of junctions") + xlab("number of tissues expressed") 
+```
+The data suggests that most commonly genes that have have a junction that is limited in expression to a single tissue, also have limited expression, in this case to two tissues.
+
+Which tissues have the most specific splicing of junctions? Is the pattern different for NET genes?
+
+```{r}
+# Take cut-off 0.4, might be conservative
+# Junctions that are specifically included in that tissue alone
+aa <- cutoffs[[3]] %>% filter(total == 1) %>% filter(Gene.id %not in% rat_ne_net_names) %>% filter_at(vars(-check_id, -Gene.id, -total), any_vars(. == 1))
+bb <- cutoffs[[3]] %>% filter(total == 2) %>% filter(Gene.id %not in% rat_ne_net_names) %>% filter_at(vars(-check_id, -Gene.id, -total), any_vars(. == 2))
+cc <- cutoffs[[3]] %>% filter(total == 3) %>% filter(Gene.id %not in% rat_ne_net_names) %>% filter_at(vars(-check_id, -Gene.id, -total), any_vars(. == 3))
+dd <- cutoffs[[3]] %>% filter(total == 4) %>% filter(Gene.id %not in% rat_ne_net_names) %>% filter_at(vars(-check_id, -Gene.id, -total), any_vars(. == 4))
+specifica <- rbind(aa,bb,cc,dd)
+specifica$NET <- rep(FALSE,nrow(specifica))
+```
+
+```{r}
+# Take cut-off 0.4, might be conservative
+# Junctions that are specifically included in that tissue alone
+# NET EDITION
+a <- cutoffs[[3]] %>% filter(total == 1) %>% filter(Gene.id %in% rat_ne_net_names) %>% filter_at(vars(-check_id, -Gene.id, -total), any_vars(. == 1))
+b <- cutoffs[[3]] %>% filter(total == 2) %>% filter(Gene.id %in% rat_ne_net_names) %>% filter_at(vars(-check_id, -Gene.id, -total), any_vars(. == 2))
+c <- cutoffs[[3]] %>% filter(total == 3) %>% filter(Gene.id %in% rat_ne_net_names) %>%filter_at(vars(-check_id, -Gene.id, -total), any_vars(. == 3))
+d <- cutoffs[[3]] %>% filter(total == 4) %>% filter(Gene.id %in% rat_ne_net_names) %>%filter_at(vars(-check_id, -Gene.id, -total), any_vars(. == 4))
+final_spec <- rbind(a,b,c,d)
+final_spec$NET <- rep(TRUE,nrow(final_spec))
+specific <- rbind(final_spec,specifica)
+
+unique(specific$Gene.id)
+
+musc <- length(specifica$muscle[specifica$muscle!=0]) # non-net
+musc_n <- length(final_spec$muscle[final_spec$muscle!=0]) # net
+liv <- length(specifica$liver[specifica$liver!=0])
+liv_n <- length(final_spec$liver[final_spec$liver!=0])
+brn <- length(specifica$brain[specifica$brain!=0])
+brn_n <- length(final_spec$brain[final_spec$brain!=0])
+test <- length(specifica$testes[specifica$testes!=0])
+test_n <- length(final_spec$testes[final_spec$testes!=0])
+hrt <- length(specifica$heart[specifica$heart!=0])
+hrt_n <- length(final_spec$heart[final_spec$heart!=0])
+tis <- c(musc,musc_n,liv,liv_n,brn,brn_n,test,test_n,hrt,hrt_n)
+TIS <- c("muscle","muscle","liver","liver","brain","brain","testes","testes","heart","heart")
+TIS <- factor(TIS, levels = c("testes", "brain", "liver","muscle","heart"))
+NET <- c("Non-NET","NET","Non-NET","NET","Non-NET","NET","Non-NET","NET","Non-NET","NET")
+answers <- data.frame(tis,TIS,NET)
+
+ggplot(answers,aes(x=TIS,y=tis,fill=NET)) + geom_col() + facet_grid(.~NET) + xlab("") + ylab("number of junctions")
+```
+Junctions that are specific to one tissue (for genes expressed in 2 or more tissues)
+
+Should do same thing but from the perspective of genes
+
+```{r}
+
+musc_g <- specific %>% group_by(Gene.id,muscle) %>% filter(muscle!=0) %>% select(Gene.id) %>% unique() %>% nrow()
+musc_g_n <- final_spec %>% group_by(Gene.id,muscle) %>% filter(muscle!=0) %>% select(Gene.id) %>% unique() %>% nrow()
+liv_g <- specific %>% group_by(Gene.id,liver) %>% filter(liver!=0) %>% select(Gene.id) %>% unique() %>% nrow()
+liv_g_n <- final_spec %>% group_by(Gene.id,liver) %>% filter(liver!=0) %>% select(Gene.id) %>% unique() %>% nrow()
+hrt_g <- specific %>% group_by(Gene.id,heart) %>% filter(heart!=0) %>% select(Gene.id) %>% unique() %>% nrow()
+hrt_g_n <- final_spec %>% group_by(Gene.id,heart) %>% filter(heart!=0) %>% select(Gene.id) %>% unique() %>% nrow()
+brn_g <- specific %>% group_by(Gene.id,brain) %>% filter(brain!=0) %>% select(Gene.id) %>% unique() %>% nrow()
+brn_g_n <- final_spec %>% group_by(Gene.id,brain) %>% filter(brain!=0) %>% select(Gene.id) %>% unique() %>% nrow()
+test_g <- specific %>% group_by(Gene.id,testes) %>% filter(testes!=0) %>% select(Gene.id) %>% unique() %>% nrow()
+test_g_n <- final_spec %>% group_by(Gene.id,testes) %>% filter(testes!=0) %>% select(Gene.id) %>% unique() %>% nrow()
+
+tis <- c(musc_g,musc_g_n,liv_g,liv_g_n,brn_g,brn_g_n,test_g,test_g_n,hrt_g,hrt_g_n)
+TIS <- c("muscle","muscle","liver","liver","brain","brain","testes","testes","heart","heart")
+TIS <- factor(TIS, levels = c("testes", "brain", "liver","muscle","heart"))
+NET <- c("Non-NET","NET","Non-NET","NET","Non-NET","NET","Non-NET","NET","Non-NET","NET")
+answers <- data.frame(tis,TIS,NET)
+
+ggplot(answers,aes(x=TIS,y=tis,fill=NET)) + geom_col() + facet_grid(.~NET) + xlab("") + ylab("number of genes")
+
+```
+
+The most common score is 1, indicating a gene that is expressed in two tissues but has differential splicing.
+What tissues are the most common combinations?
+
+```{r}
+# Take threshold as 0.2
+threshold_0.2 <- summariseSplicing(mean_final,0.2,tissues)
+threshold_0.2$NET <- threshold_0.2$Gene.id %in% rat_ne_net_names
+
+# Filter for total score 1
+one_score <- threshold_0.2 %>% filter(total == 1) %>% filter_at(vars(-check_id, -Gene.id, -total, -NET), any_vars(. == 1))
+one_score
+m_net <- one_score %>% filter(NET==TRUE) %>% select(muscle) %>% filter(muscle > 0) %>% nrow()
+m_non_net <- one_score %>% filter(NET==FALSE) %>% select(muscle) %>% filter(muscle > 0) %>% nrow()
+b_net <- one_score %>% filter(NET==TRUE) %>% select(brain) %>% filter(brain > 0) %>% nrow()
+b_non_net <- one_score %>% filter(NET==FALSE) %>% select(brain) %>% filter(brain > 0) %>% nrow()
+l_net <- one_score %>% filter(NET==TRUE) %>% select(liver) %>% filter(liver > 0) %>% nrow()
+l_non_net <- one_score %>% filter(NET==FALSE) %>% select(liver) %>% filter(liver > 0) %>% nrow()
+h_net <- one_score %>% filter(NET==TRUE) %>% select(heart) %>% filter(heart > 0) %>% nrow()
+h_non_net <- one_score %>% filter(NET==FALSE) %>% select(heart) %>% filter(heart > 0) %>% nrow()
+t_net <- one_score %>% filter(NET==TRUE) %>% select(testes) %>% filter(testes > 0) %>% nrow()
+t_non_net <- one_score %>% filter(NET==FALSE) %>% select(testes) %>% filter(testes > 0) %>% nrow()
+
+tis <- c(m_non_net,m_net,l_non_net,l_net,b_non_net,b_net,t_non_net,t_net,h_non_net,h_net)
+TIS <- c("muscle","muscle","liver","liver","brain","brain","testes","testes","heart","heart")
+TIS <- factor(TIS, levels = c("testes", "brain", "liver","muscle","heart"))
+NET <- c("Non-NET","NET","Non-NET","NET","Non-NET","NET","Non-NET","NET","Non-NET","NET")
+answers <- data.frame(tis,TIS,NET)
+
+ggplot(answers,aes(x=TIS,y=tis,fill=NET)) + geom_col() + facet_grid(.~NET) + xlab("") + ylab("number of junctions")
+
+```
+
+What are the most common expression combos when total score is 1, and can this be validated by expression data?
+
+```{r}
+
+# Get the tissue data tables for threshold 0.2
+
+tissue_dfs <- getTissueDataframes(mean_final,0.2,tissues)
+
+# Column 2 in the tissue_df is the check_id
+# Same for summary df 'threshold 0.2'
+# Get check_ids for all junctions with a total score in the summary df of 1, indicating expression
+# limited to two tissues and differential splicing between them
+
+one_score <- threshold_0.2 %>% filter(total == 1) %>% filter(NET==FALSE) %>% filter_at(vars(-check_id, -Gene.id, -total, -NET), any_vars(. == 1)) %>% select(check_id)
+one_score <- one_score$check_id # make a vector from the df
+
+# Filter the tissue specific dataframes for check_ids in one_score
+filt_tissue_dfs <- list()
+for (i in 1:length(tissue_dfs)){
+  filt_tissue_dfs[[i]] <- tissue_dfs[[i]] %>% filter(tissue_dfs[[i]][[2]] %in% one_score)
+}
+
+# For each filtered dataframe take non zero columns and append to a new df
+
+filt_tissue_dfs[[1]]
+m <- data.frame(unlist(lapply(filt_tissue_dfs[[1]], function(x) if(is.numeric(x)) sum(x, na.rm=T))))
+colnames(m) <- c("count")
+b <- data.frame(unlist(lapply(filt_tissue_dfs[[2]], function(x) if(is.numeric(x)) sum(x, na.rm=T))))
+colnames(b) <- c("count")
+l <- data.frame(unlist(lapply(filt_tissue_dfs[[3]], function(x) if(is.numeric(x)) sum(x, na.rm=T))))
+colnames(l) <- c("count")
+h <- data.frame(unlist(lapply(filt_tissue_dfs[[4]], function(x) if(is.numeric(x)) sum(x, na.rm=T))))
+colnames(h) <- c("count")
+t <-data.frame( unlist(lapply(filt_tissue_dfs[[5]], function(x) if(is.numeric(x)) sum(x, na.rm=T))))
+colnames(t) <- c("count")
+new <- rbind(m,b,l,h,t)
+
+# get rid of total rows
+new <- new %>% rownames_to_column() 
+new <- new[!grepl("total", new$rowname),]
+new$rowname <- gsub("1","_R",new$rowname)
+new
+ggplot(new,aes(y=new$count,x=new$rowname)) + geom_col() + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + xlab("") + ylab("number of junctions")
+
+```
+
+
+The above shows the number of junctions that have an overall score of 1 (suggesting expression restricted to two tissues and a specific junction usage in one of the tissues)
+
+
+Same as above but for NETs
+
+```{r}
+# Get the tissue data tables for threshold 0.2
+
+tissue_dfs <- getTissueDataframes(mean_final,0.2,tissues)
+
+# Column 2 in the tissue_df is the check_id
+# Same for summary df 'threshold 0.2'
+# Get check_ids for all junctions with a total score in the summary df of 1, indicating expression
+# limited to two tissues and differential splicing between them
+
+one_score <- threshold_0.2 %>% filter(total == 1) %>% filter(NET==TRUE) %>% filter_at(vars(-check_id, -Gene.id, -total, -NET), any_vars(. == 1)) %>% select(check_id)
+one_score <- one_score$check_id # make a vector from the df
+
+# Filter the tissue specific dataframes for check_ids in one_score
+filt_tissue_dfs <- list()
+for (i in 1:length(tissue_dfs)){
+  filt_tissue_dfs[[i]] <- tissue_dfs[[i]] %>% filter(tissue_dfs[[i]][[2]] %in% one_score)
+}
+
+# For each filtered dataframe take non zero columns and append to a new df
+
+m <- data.frame(unlist(lapply(filt_tissue_dfs[[1]], function(x) if(is.numeric(x)) sum(x, na.rm=T))))
+colnames(m) <- c("count")
+b <- data.frame(unlist(lapply(filt_tissue_dfs[[2]], function(x) if(is.numeric(x)) sum(x, na.rm=T))))
+colnames(b) <- c("count")
+l <- data.frame(unlist(lapply(filt_tissue_dfs[[3]], function(x) if(is.numeric(x)) sum(x, na.rm=T))))
+colnames(l) <- c("count")
+h <- data.frame(unlist(lapply(filt_tissue_dfs[[4]], function(x) if(is.numeric(x)) sum(x, na.rm=T))))
+colnames(h) <- c("count")
+t <-data.frame( unlist(lapply(filt_tissue_dfs[[5]], function(x) if(is.numeric(x)) sum(x, na.rm=T))))
+colnames(t) <- c("count")
+new <- rbind(m,b,l,h,t)
+
+# get rid of total rows
+new <- new %>% rownames_to_column() 
+new <- new[!grepl("total", new$rowname),]
+new$rowname <- gsub("1","_R",new$rowname)
+new
+ggplot(new,aes(y=new$count,x=new$rowname)) + geom_col() + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + xlab("") + ylab("number of junctions")
+```
+
+Is it true that these genes are restricted in expression??
+Let's look at the most common -testes vs. brain
+
+```{r}
+
+brain_exprs <- fread("/homes/s1207699/data/RAT_brain_gse4_exprs.txt",header=FALSE)
+testes_exprs <- fread("/homes/s1207699/data/RAT_testes_gse4_exprs.txt",header=FALSE)
+heart_exprs <- fread("/homes/s1207699/data/RAT_heart_gse4_exprs.txt",header=FALSE)
+muscle_exprs <- fread("/homes/s1207699/data/RAT_muscle_gse4_exprs.txt",header=FALSE)
+liver_exprs <- fread("/homes/s1207699/data/RAT_liver_gse4_exprs.txt",header=FALSE)
+
+# Get gene ids of genes we expect to only be expressed in testes and brain
+# Get the tissue data tables for threshold 0.2
+tissue_dfs <- getTissueDataframes(mean_final,0.2,tissues)
+# Column 2 in the tissue_df is the check_id
+# Same for summary df 'threshold 0.2'
+# Get check_ids for all junctions with a total score in the summary df of 1, indicating expression
+# limited to two tissues and differential splicing between them
+threshold_0.2 <- summariseSplicing(mean_final,0.2,tissues)
+threshold_0.2$NET <- threshold_0.2$Gene.id %in% rat_ne_net_names
+one_score <- threshold_0.2 %>% filter(total == 1) %>% filter_at(vars(-check_id, -Gene.id, -total, -NET), any_vars(. == 1)) %>% select(check_id)
+one_score <- one_score$check_id # make a vector from the df
+# Filter the tissue specific dataframes for check_ids in one_score
+filt_tissue_dfs <- list()
+for (i in 1:length(tissue_dfs)){
+  filt_tissue_dfs[[i]] <- tissue_dfs[[i]] %>% filter(tissue_dfs[[i]][[2]] %in% one_score)
+}
+filt_tissue_dfs[[2]]
+t_b <- filt_tissue_dfs[[5]] %>% filter(testes_brain==1) %>% select(.,1)
+b_t <- filt_tissue_dfs[[2]] %>% filter(testes_brain==1) %>% select(.,1)
+total_test_brain <- unique(rbind(b_t,t_b))
+tot_genes <- nrow(total_test_brain)
+
+# number expr in brain and testes 
+sum(total_test_brain[[1]] %in% brain_exprs[[1]] & total_test_brain[[1]] %in% testes_exprs[[1]])/tot_genes
+
+# NUMBER restricted to brain and testes
+sum(total_test_brain[[1]] %in% brain_exprs[[1]] & total_test_brain[[1]] %in% testes_exprs[[1]] & total_test_brain[[1]] %not in% heart_exprs[[1]] & total_test_brain[[1]] %not in% muscle_exprs[[1]] & total_test_brain[[1]] %not in% liver_exprs[[1]])/tot_genes
+
+# NUMBER restricted to brain and testes and heart
+sum(total_test_brain[[1]] %in% brain_exprs[[1]] & total_test_brain[[1]] %in% testes_exprs[[1]] & total_test_brain[[1]] %in% heart_exprs[[1]] & total_test_brain[[1]] %not in% muscle_exprs[[1]] & total_test_brain[[1]] %not in% liver_exprs[[1]])/tot_genes
+
+# number expressed in all
+sum(total_test_brain[[1]] %in% brain_exprs[[1]] & total_test_brain[[1]] %in% testes_exprs[[1]] & total_test_brain[[1]] %in% heart_exprs[[1]] & total_test_brain[[1]] %in% muscle_exprs[[1]] & total_test_brain[[1]] %in% liver_exprs[[1]])/tot_genes
+
+# NUMBER expressed in brain and testes and muscle
+sum(total_test_brain[[1]] %in% brain_exprs[[1]] & total_test_brain[[1]] %in% testes_exprs[[1]] & total_test_brain[[1]] %not in% heart_exprs[[1]] & total_test_brain[[1]] %in% muscle_exprs[[1]] & total_test_brain[[1]] %not in% liver_exprs[[1]])/tot_genes
+
+# number expressed in all but heart
+sum(total_test_brain[[1]] %in% brain_exprs[[1]] & total_test_brain[[1]] %in% testes_exprs[[1]] & total_test_brain[[1]] %not in% heart_exprs[[1]] & total_test_brain[[1]] %in% muscle_exprs[[1]] & total_test_brain[[1]] %in% liver_exprs[[1]])/tot_genes
+
+# number expressed in all but muscle
+sum(total_test_brain[[1]] %in% brain_exprs[[1]] & total_test_brain[[1]] %in% testes_exprs[[1]] & total_test_brain[[1]] %in% heart_exprs[[1]] & total_test_brain[[1]] %not in% muscle_exprs[[1]] & total_test_brain[[1]] %in% liver_exprs[[1]])/tot_genes
+
+```
+
+```{r}
+# How many are in NETs tested to be targeted
+
+rat_tested <- read.csv("/homes/s1207699/stuff_fromeric/rat_tested_nets.txt",header=FALSE)
+rat_tested <- rat_tested$V1
+mean_final[mean_final$Gene.id %in% rat_tested,]
+mean_final[mean_final$Gene.name=="Ranbp2",]
+threshold_0.2[threshold_0.2$Gene.id=="ENSRNOG00000000796",]
+fwrite(threshold_0.3, file="/homes/s1207699/data/gse4_threshold_0.3")
+
+
+# Annotate junctions with novel or not
+annot_juncs <- fread("/homes/s1207699/data/rna/rat_genome_prim/sjdbList.out.tab")
+
+annot_juncs$check_id <- paste0(annot_juncs$V1,":",annot_juncs$V2-1,"-",annot_juncs$V3+1,";",annot_juncs$V4)
+
+
+annot_juncs$check_id <- as.character(annot_juncs$check_id)
+threshold_0.2$check_id <- as.character(threshold_0.2$check_id)
+
+threshold_0.2$novel <- threshold_0.2$check_id %in% annot_juncs$check_id
+
+n <- threshold_0.2[threshold_0.2$Gene.id %in% rat_ne_net_names,]
+fwrite(n, file="/homes/s1207699/data/gse4_threshold_0.2_nets")
+
+```
+
+```{r}
+nrow(unique(n[n$muscle>0,]))
+nrow(unique(n[(n$muscle>0)&(n$novel==FALSE),]))
+
+```
+
