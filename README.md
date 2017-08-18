@@ -8,3 +8,4 @@ Note! To view R markdown HTML files you can use RawGit https://rawgit.com/
   * tissue_specific_MAJIQ_analysis.Rmd - code for parsing MAJIQ tsv output file of multiple tissue comparisons, reformatting to junctions and scoring tissue specificity, graphs using the tissue-scoring system are found here
   * SPLICING_SUMMARY.nb.html - a summary of all the MAJIQ analyses with a few graphs
   * NET_categories_upset.nb.html - using upset plots to categorise net genes
+  * deseq_pca.nb.html - PCA plots for all samples and code for generating lists of expressed genes
