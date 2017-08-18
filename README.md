@@ -9,3 +9,4 @@ Note! To view R markdown HTML files you can use RawGit https://rawgit.com/
   * SPLICING_SUMMARY.nb.html - a summary of all the MAJIQ analyses with a few graphs
   * NET_categories_upset.nb.html - using upset plots to categorise net genes
   * deseq_pca.nb.html - PCA plots for all samples and code for generating lists of expressed genes
+  * MAJIQ_paper_NET_data_analysis.nb.html - heatmaps generated from the MAJIQ paper data, with proportion of nets spliced
