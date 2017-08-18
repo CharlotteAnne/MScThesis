@@ -7,3 +7,4 @@ Note! To view R markdown HTML files you can use RawGit https://rawgit.com/
   * fasta_parsing/trim_fasta.py - for changing fasta headers on translated database files, trimming to the first stop codon, and trimming based on user defined minimum length (ie. 7aa for exons and the extension length for junctions). The other short python programs in this folder are for counting reads in a fasta file and changing header names
   * tissue_specific_MAJIQ_analysis.Rmd - code for parsing MAJIQ tsv output file of multiple tissue comparisons, reformatting to junctions and scoring tissue specificity
   * SPLICING_SUMMARY.nb.html - a summary of all the MAJIQ analyses with a few graphs
+  * NET_categories_upset.nb.html - using upset plots to categorise net genes
